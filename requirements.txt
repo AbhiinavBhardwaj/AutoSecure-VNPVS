@@ -5,3 +5,5 @@ numpy
 Pillow
 easyocr
 ultralytics
+ pymongo 
+ dotenv

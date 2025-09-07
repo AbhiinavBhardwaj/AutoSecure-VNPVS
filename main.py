@@ -4,7 +4,7 @@ from services.database_manager import manage_database
 
 st.set_page_config(page_title="Vehicle Number Plate Verification", layout="wide")
 
-st.title("🇮🇳 Vehicle Numberplate Verification")
+st.title(" Vehicle Numberplate Verification")
 st.markdown("Upload a vehicle image to detect and verify its license plate against the database.")
 
 # Single uploader

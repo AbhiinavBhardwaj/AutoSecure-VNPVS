@@ -1,21 +1,22 @@
 import streamlit as st
-import pandas as pd
-import re
-from utils.database import load_database
-from config import DATABASE_PATH
-
+from utils.db_utils import get_residents_collection
 
 def normalize_plate(text: str) -> str:
+    import re
     return re.sub(r'[^A-Z0-9]', '', (text or "").upper())
 
 
 def manage_database():
-    """UI for viewing, adding, editing, and deleting vehicle records."""
-    vehicle_db = load_database(DATABASE_PATH)
+    """UI for viewing, adding, editing, and deleting vehicle records (MongoDB)."""
+    residents = get_residents_collection()
 
     # --- Show database ---
     if st.checkbox("Show Vehicle Database", value=True):
-        st.dataframe(vehicle_db)
+        data = list(residents.find({}, {"_id": 0}))
+        if data:
+            st.dataframe(data)
+        else:
+            st.info("📂 Database is empty. Add a record first.")
 
     # --- Add new record ---
     if st.checkbox("Add New Vehicle Record"):
@@ -36,56 +37,51 @@ def manage_database():
                     st.error("⚠️ All fields are required.")
                     return
 
-                if not vehicle_db.empty and plate in vehicle_db["NumberPlate"].values:
+                if residents.find_one({"plate": plate}):
                     st.warning(f"Plate `{plate}` already exists.")
                     return
 
-                new_row = {
-                    "NumberPlate": plate,
-                    "OwnerName": owner,
-                    "Brand": brand,
-                    "Color": color,
-                }
-
-                vehicle_db = pd.concat([vehicle_db, pd.DataFrame([new_row])], ignore_index=True)
-                vehicle_db.to_csv(DATABASE_PATH, index=False)
+                residents.insert_one({
+                    "plate": plate,
+                    "owner": owner,
+                    "brand": brand,
+                    "color": color
+                })
                 st.success(f"✅ New record for `{plate}` added successfully.")
-                st.dataframe(vehicle_db)
 
     # --- Edit / Delete record ---
     if st.checkbox("Edit or Delete Records"):
-        if vehicle_db.empty:
+        data = list(residents.find({}, {"_id": 0}))
+        if not data:
             st.info("📂 Database is empty. Add a record first.")
             return
 
-        selected_plate = st.selectbox(
-            "Select Vehicle by Number Plate", vehicle_db["NumberPlate"].tolist()
-        )
+        plates = [d["plate"] for d in data]
+        selected_plate = st.selectbox("Select Vehicle by Number Plate", plates)
 
         if selected_plate:
-            record = vehicle_db.loc[vehicle_db["NumberPlate"] == selected_plate].iloc[0]
+            record = residents.find_one({"plate": selected_plate}, {"_id": 0})
 
             with st.form("edit_vehicle_form"):
-                owner_edit = st.text_input("Owner Name", value=record["OwnerName"])
-                brand_edit = st.text_input("Brand", value=record["Brand"])
-                color_edit = st.text_input("Color", value=record["Color"])
+                owner_edit = st.text_input("Owner Name", value=record["owner"])
+                brand_edit = st.text_input("Brand", value=record["brand"])
+                color_edit = st.text_input("Color", value=record["color"])
 
                 col1, col2 = st.columns(2)
                 update_btn = col1.form_submit_button("💾 Update Record")
                 delete_btn = col2.form_submit_button("🗑️ Delete Record")
 
                 if update_btn:
-                    vehicle_db.loc[
-                        vehicle_db["NumberPlate"] == selected_plate,
-                        ["OwnerName", "Brand", "Color"],
-                    ] = [owner_edit.strip(), brand_edit.strip(), color_edit.strip()]
-
-                    vehicle_db.to_csv(DATABASE_PATH, index=False)
+                    residents.update_one(
+                        {"plate": selected_plate},
+                        {"$set": {
+                            "owner": owner_edit.strip(),
+                            "brand": brand_edit.strip(),
+                            "color": color_edit.strip()
+                        }}
+                    )
                     st.success(f"✅ Record for `{selected_plate}` updated.")
-                    st.dataframe(vehicle_db)
 
                 if delete_btn:
-                    vehicle_db = vehicle_db[vehicle_db["NumberPlate"] != selected_plate]
-                    vehicle_db.to_csv(DATABASE_PATH, index=False)
+                    residents.delete_one({"plate": selected_plate})
                     st.success(f"🗑️ Record for `{selected_plate}` deleted.")
-                    st.dataframe(vehicle_db)

@@ -1,105 +1,135 @@
-import numpy as np
 import cv2
-import streamlit as st
+import numpy as np
 from PIL import Image, ImageOps
+import streamlit as st
 from datetime import datetime
+import re
 
-from models.yolo_loader import load_yolo_model
-from models.ocr_loader import load_ocr_reader
-from utils.preprocessing import preprocess_text
+from ultralytics import YOLO
+from paddleocr import PaddleOCR
+
 from utils.db_utils import get_residents_collection, get_logs_collection
-from config import MODEL_PATH, CONFIDENCE_THRESHOLD, OCR_LANGUAGES
+from config import MODEL_PATH, CONFIDENCE_THRESHOLD
 
+# ------------------------
+# 1️⃣ Initialize OCR + YOLO
+# ------------------------
+ocr = PaddleOCR(use_angle_cls=True, lang="en")  # high-accuracy OCR
+yolo = YOLO(MODEL_PATH)  # YOLOv8 custom model
 
+# ------------------------
+# 2️⃣ Preprocess OCR text
+# ------------------------
+def preprocess_text(ocr_text: str):
+    """
+    Clean OCR output to extract valid Indian license plate numbers.
+    Format examples:
+        MH43D9740, DL1CAB1234, GJ05AB6789
+    """
+    if not ocr_text:
+        return None
+    cleaned = re.sub(r"[^A-Z0-9]", "", ocr_text.upper())
+    match = re.match(r"[A-Z]{2}\d{1,2}[A-Z]{0,2}\d{1,4}", cleaned)
+    return match.group() if match else None
+
+# ------------------------
+# 3️⃣ Main detection pipeline
+# ------------------------
 def process_image(image_file):
-    """Pipeline: detect → OCR → verify with MongoDB → log results"""
+    """
+    Full pipeline:
+    1. Load image
+    2. YOLO plate detection
+    3. PaddleOCR recognition
+    4. DB verification + logging
+    5. Streamlit display
+    """
 
-    # --- Load models ---
-    yolo = load_yolo_model(MODEL_PATH)
-    ocr = load_ocr_reader(OCR_LANGUAGES)
-
-    if not yolo or not ocr:
-        st.warning("⚠️ Failed to load YOLO or OCR models.")
-        return
-
-    # --- Load DB collections ---
+    # --- Load DB ---
     residents = get_residents_collection()
     logs = get_logs_collection()
 
-    # --- Prepare image ---
+    # --- Load and prepare image ---
     img = Image.open(image_file)
     img = ImageOps.exif_transpose(img)  # fix orientation
     img_cv = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
 
-    # --- Detect plates ---
-    results = yolo(img_cv)[0]
+    # --- YOLO detection ---
+    results = yolo.predict(img_cv, conf=CONFIDENCE_THRESHOLD)
+    annotated_img = results[0].plot()
 
-    # Draw bounding boxes on original image
-    annotated_img = results.plot()
-
-    # --- Show uploaded + annotated side by side ---
+    # --- Display uploaded vs annotated ---
     col1, col2 = st.columns(2)
     with col1:
         st.image(img, caption="📷 Uploaded Vehicle Image", width=350)
     with col2:
         st.image(annotated_img, caption="🔲 Detected Plates", channels="BGR", width=350)
 
-    # 👇 Debugging: show raw YOLO detections
-    st.write("Raw YOLO detections:", results.boxes.data)
+    # --- Debug raw YOLO detections ---
+    st.write("Raw YOLO detections:", results[0].boxes.data)
 
-    plate_detected = False
-    crops = []  # store all cropped plates
+    plate_number = None
+    crops = []
 
-    for x1, y1, x2, y2, score, _ in results.boxes.data.tolist():
-        if score > CONFIDENCE_THRESHOLD:
-            plate_detected = True
+    # --- Loop over YOLO detections ---
+    for box in results[0].boxes:
+        x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+        score = float(box.conf[0])
 
-            # Crop detected plate
-            crop = img_cv[int(y1):int(y2), int(x1):int(x2)]
-            crops.append(crop)
+        if score < CONFIDENCE_THRESHOLD:
+            continue
 
-            # OCR
-            ocr_text = " ".join([res[1] for res in ocr.readtext(crop)])
-            plate_number = preprocess_text(ocr_text)
+        # Crop plate
+        crop = img_cv[y1:y2, x1:x2]
+        crops.append(crop)
 
-            # OCR results styled
-            st.markdown(
-                f"**🔍 OCR Raw:** <span style='font-size:18px; color:lime;'>{ocr_text}</span>",
-                unsafe_allow_html=True,
-            )
-            st.markdown(
-                f"**📌 Processed Plate:** <span style='font-size:20px; color:yellow;'>{plate_number}</span>",
-                unsafe_allow_html=True,
-            )
+        # OCR via PaddleOCR
+        ocr_result = ocr.ocr(crop, cls=True)
+        #ocr_text = "".join([line[1][0] for line in ocr_result]) if ocr_result else ""
+        ocr_text = "".join(
+    item[1][0] if isinstance(item[1][0], str) else "".join(item[1][0])
+    for line in ocr_result
+    for item in line
+)
 
-            # --- Verification ---
-            if plate_number:
-                match = residents.find_one({"plate": plate_number})
-                status = "VERIFIED" if match else "UNREGISTERED"
+        plate_number = preprocess_text(ocr_text)
 
-                if match:
-                    st.success(
-                        f"✅ Verified: {match['owner']} | {match['brand']} | {match['color']}"
-                    )
-                else:
-                    st.error("❌ Plate not found in resident database.")
+        # Display OCR
+        st.markdown(
+            f"**🔍 OCR Raw:** <span style='font-size:18px; color:lime;'>{ocr_text}</span>",
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f"**📌 Processed Plate:** <span style='font-size:20px; color:yellow;'>{plate_number}</span>",
+            unsafe_allow_html=True,
+        )
 
-                logs.insert_one({
-                    "plate": plate_number,
-                    "timestamp": datetime.now(),
-                    "status": status
-                })
+        # --- DB verification & logging ---
+        if plate_number:
+            match = residents.find_one({"plate": plate_number})
+            status = "VERIFIED" if match else "UNREGISTERED"
+
+            if match:
+                st.success(
+                    f"✅ Verified: {match['owner']} | {match['brand']} | {match['color']}"
+                )
             else:
-                st.warning("⚠️ No valid plate extracted.")
-            break
+                st.error("❌ Plate not found in resident database.")
 
-    # --- Show all cropped plates side by side ---
+            logs.insert_one({
+                "plate": plate_number,
+                "timestamp": datetime.utcnow(),
+                "status": status
+            })
+            break  # stop after first valid plate
+
+    # --- Display all plate crops ---
     if crops:
         st.markdown("### 🎯 Detected Plate Crops")
-        crop_cols = st.columns(len(crops))
         for idx, crop in enumerate(crops):
-            with crop_cols[idx]:
-                st.image(crop, caption=f"Plate {idx+1}", channels="BGR", width=200)
+            st.image(crop, caption=f"Plate {idx+1}", channels="BGR", width=200)
 
-    if not plate_detected:
+    if not crops:
         st.warning("⚠️ No plate detected with sufficient confidence.")
+    elif not plate_number:
+        st.warning("⚠️ OCR could not extract a valid plate from detected crops.")

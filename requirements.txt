@@ -1,9 +1,22 @@
-streamlit
-opencv-python
-pandas
-numpy
-Pillow
-easyocr
-ultralytics
- pymongo 
- dotenv
+# Core AI + Vision
+torch==2.2.2+cu118       # GPU-enabled Torch
+torchvision==0.17.2+cu118
+torchaudio==2.2.2+cu118
+ultralytics==8.2.50      # YOLOv8
+paddleocr==2.7.0.3
+paddlepaddle-gpu==2.5.2  # Match CUDA 11.8
+opencv-contrib-python==4.6.0.66
+numpy==1.26.4
+Pillow==10.4.0
+
+# Dashboard + API
+streamlit==1.38.0
+fastapi==0.115.0
+uvicorn[standard]==0.30.0
+
+# Database
+pymongo==4.8.0
+
+# Utils
+python-dotenv==1.0.1
+tqdm==4.66.5
